@@ -1,0 +1,14 @@
+{
+  "name": "health-hmis-agent",
+  "author": {
+    "name": "User",
+    "email": "user@example.com"
+  },
+  "version": "1.0.0",
+  "wailsjsdir": "./frontend",
+  "frontend:build": "",
+  "frontend:install": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto",
+  "outputfilename": "health-hmis-agent"
+}
