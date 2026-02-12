@@ -1,14 +1,12 @@
 {
-  "name": "health-hmis-agent",
+  "name": "MidasHealthHMISAgent",
+  "outputfilename": "health-hmis-agent",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "http://localhost:5173",
   "author": {
-    "name": "User",
-    "email": "user@example.com"
-  },
-  "version": "1.0.0",
-  "wailsjsdir": "./frontend",
-  "frontend:build": "",
-  "frontend:install": "",
-  "frontend:dev:watcher": "",
-  "frontend:dev:serverUrl": "auto",
-  "outputfilename": "health-hmis-agent"
+    "name": "Midas Health",
+    "email": ""
+  }
 }

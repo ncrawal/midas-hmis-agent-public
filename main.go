@@ -1,137 +1,77 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"embed"
+	"health-hmis-agent/internal/api"
+	"health-hmis-agent/internal/models"
+	"health-hmis-agent/internal/service"
+	"health-hmis-agent/internal/ui"
+	"log"
 	"net"
 	"net/http"
 	"os"
-	"runtime"
+
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
-// DeviceInfo represents the core identity of the hardware.
-type DeviceInfo struct {
-	MAC      string   `json:"mac"`      // Primary/Best guess MAC
-	MACs     []string `json:"mac_list"` // All valid MACs found
-	IP       string   `json:"local_ip"`
-	Hostname string   `json:"hostname"`
-	OS       string   `json:"os_platform"`
-	Version  string   `json:"agent_version"`
-}
-
-const (
-	AgentVersion = "1.2.1-cli"
-	DefaultPort  = "51730"
-)
-
-// GetDeviceInfo uses hardware-level logic to find the primary identity.
-func GetDeviceInfo() DeviceInfo {
-	info := DeviceInfo{
-		OS:      runtime.GOOS,
-		Version: AgentVersion,
-		MACs:    []string{},
-	}
-
-	if host, err := os.Hostname(); err == nil {
-		info.Hostname = host
-	}
-
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return info
-	}
-
-	// Helper to check if array contains value
-	contains := func(slice []string, val string) bool {
-		for _, item := range slice {
-			if item == val {
-				return true
-			}
-		}
-		return false
-	}
-
-	for _, iface := range interfaces {
-		// Skip loopback/down (Keep simple logic)
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		mac := iface.HardwareAddr.String()
-		if mac == "" {
-			continue
-		}
-
-		// Add to comprehensive list if unique
-		if !contains(info.MACs, mac) {
-			info.MACs = append(info.MACs, mac)
-		}
-
-		// Priority Logic for Primary MAC ID:
-		// 1. Prefer "en0" (macOS Wi-Fi/Ethernet)
-		// 2. Prefer "eth0" (Linux Ethernet)
-		// 3. Fallback to first found
-
-		isPriority := iface.Name == "en0" || iface.Name == "eth0"
-		if info.MAC == "" || isPriority {
-			// If we already have a priority MAC, don't overwrite unless this one is ALSO priority?
-			// Simpler: If we haven't found a priority one yet, accept this.
-			// If this IS a priority one, take it immediately.
-
-			// If we already have a value, only overwrite if current iface is "en0" or "eth0"
-			if info.MAC != "" {
-				if isPriority {
-					info.MAC = mac
-				}
-			} else {
-				// No mac set yet, take this one
-				info.MAC = mac
-			}
-		}
-
-		// Grab IP (Keep similar logic, prioritize first valid non-loopback)
-		if info.IP == "" {
-			addrs, _ := iface.Addrs()
-			for _, addr := range addrs {
-				if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-					if ipnet.IP.To4() != nil {
-						info.IP = ipnet.IP.String()
-					}
-				}
-			}
-		}
-	}
-
-	return info
-}
+//go:embed all:frontend/dist
+var assets embed.FS
 
 func main() {
-	port := DefaultPort
-	if p := os.Getenv("AGENT_PORT"); p != "" {
-		port = p
-	}
-
-	http.HandleFunc("/health-agent", func(w http.ResponseWriter, r *http.Request) {
-		// Enable CORS for all origins (Safe for local agent)
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Content-Type", "application/json")
-
-		if r.Method == "OPTIONS" {
+	// 1. Handle Service commands first (install, uninstall, start, etc.)
+	// If it's a service command, it will execute and exit.
+	if len(os.Args) > 1 {
+		arg := os.Args[1]
+		validCommands := map[string]bool{
+			"install": true, "uninstall": true, "start": true,
+			"stop": true, "status": true, "restart": true,
+		}
+		if validCommands[arg] {
+			if err := service.RunService(); err != nil {
+				log.Fatal(err)
+			}
 			return
 		}
+	}
 
-		info := GetDeviceInfo()
-		json.NewEncoder(w).Encode(info)
+	// 2. Start the HTTP server in background (for non-service mode, e.g., desktop app)
+	go func() {
+		ln, err := net.Listen("tcp", "127.0.0.1:"+models.DefaultPort)
+		if err != nil {
+			// Already running or port taken
+			return
+		}
+		ln.Close()
+
+		mux := http.NewServeMux()
+		api.RegisterHandlers(mux)
+
+		log.Printf("Starting Background API on port %s...", models.DefaultPort)
+		if err := http.ListenAndServe("127.0.0.1:"+models.DefaultPort, mux); err != nil {
+			log.Printf("API Server failed: %v", err)
+		}
+	}()
+
+	// 3. Start Wails GUI
+	app := ui.NewApp()
+
+	err := wails.Run(&options.App{
+		Title:  "Midas Health HMIS Agent",
+		Width:  400,
+		Height: 500,
+		AssetServer: &assetserver.Options{
+			Assets: assets,
+		},
+		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
+		OnStartup:        app.Startup,
+		Bind: []interface{}{
+			app,
+		},
 	})
 
-	fmt.Printf("Midas Agent %s starting on port %s...\n", AgentVersion, port)
-	fmt.Printf("Endpoint: http://localhost:%s/health-agent\n", port)
-
-	err := http.ListenAndServe(":"+port, nil)
 	if err != nil {
-		fmt.Printf("Error starting server: %v\n", err)
-		os.Exit(1)
+		println("Error:", err.Error())
 	}
 }

@@ -1,75 +1,185 @@
 #!/bin/bash
 
-OUT_DIR="release"
-rm -rf $OUT_DIR
-mkdir -p $OUT_DIR
+# Normalized Build Script for Health HMIS Agent
+# Handles macOS (native), Linux (Docker), Windows (Docker)
 
-VERSION="1.2.1-cli"
+set -e
 
-echo "Building version $VERSION..."
+# Colors
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
 
-# Generate metadata.json
-echo "{\"version\": \"$VERSION\"}" > $OUT_DIR/metadata.json
+# Extract Version from Go source
+VERSION=$(grep 'AgentVersion =' internal/models/models.go | cut -d '"' -f 2)
+APP_NAME="health-hmis-agent"
 
-echo "Building for macOS (AMD64)..."
-GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o $OUT_DIR/temp_amd64 main.go
+echo -e "${BLUE}🔨 Health HMIS Agent Build System v${VERSION}${NC}"
+echo "=============================="
 
-# Package macOS AMD64 App
-APP_DIR="$OUT_DIR/HealthAgent-Mac-Intel.app"
-mkdir -p "$APP_DIR/Contents/MacOS"
-cp Info.plist "$APP_DIR/Contents/"
-cp $OUT_DIR/temp_amd64 "$APP_DIR/Contents/MacOS/health-agent"
-chmod +x "$APP_DIR/Contents/MacOS/health-agent"
-# Ad-hoc sign the app to prevent "Damaged" error
-codesign --force --deep -s - "$APP_DIR"
-# Zip the app
-cd $OUT_DIR
-zip -r agent-$VERSION-mac-amd64.zip HealthAgent-Mac-Intel.app
-rm -rf HealthAgent-Mac-Intel.app temp_amd64
-cd ..
+mkdir -p release
+
+# Function: Build macOS (runs on host Mac)
+build_macos() {
+    echo -e "\n${BLUE}🍎 Building for macOS...${NC}"
+    rm -rf build/bin
+    
+    # Build Universal Binary inside .app
+    wails build -platform darwin/universal -clean
+    
+    # Find the generated .app (Wails uses 'name' from wails.json, not 'outputfilename')
+    APP_BUNDLE=$(find build/bin -maxdepth 1 -name "*.app" | head -n 1)
+    
+    if [ -n "$APP_BUNDLE" ]; then
+        echo "✅ Found app bundle: $APP_BUNDLE"
+        DMG_NAME="release/HealthHMISAgent-v${VERSION}-macOS.dmg"
+        rm -f "$DMG_NAME"
+        
+        # Create temp folder for DMG content
+        mkdir -p build/dmg_content
+        cp -r "$APP_BUNDLE" build/dmg_content/
+        
+        # Create DMG
+        hdiutil create -volname "Health HMIS Agent" -srcfolder "build/dmg_content" -ov -format UDZO "$DMG_NAME"
+        rm -rf build/dmg_content
+        
+        echo -e "${GREEN}✓ macOS DMG created: $DMG_NAME${NC}"
+    else
+        echo -e "${RED}❌ macOS build failed (.app not found)${NC}"
+        exit 1
+    fi
+}
+
+# Function: Build Linux & Windows (runs inside Docker)
+build_linux_windows() {
+    echo -e "\n${BLUE}🐧/🪟 Building for Linux & Windows (inside container)...${NC}"
+    
+    # -----------------------------------------------------
+    # 1. Linux Binary & DEB
+    # -----------------------------------------------------
+    echo "This building process will take some time..."
+    echo "   Building Linux binary..."
+    wails build -platform linux/amd64 -clean -o $APP_NAME
+    
+    LINUX_BIN="build/bin/${APP_NAME}"
+    
+    if [ -f "$LINUX_BIN" ]; then
+        # Create DEB package structure manually
+        echo "   Pkg: Building .deb..."
+        DEB_DIR="build/deb_pkg"
+        rm -rf "$DEB_DIR"
+        mkdir -p "$DEB_DIR/DEBIAN"
+        mkdir -p "$DEB_DIR/usr/local/bin"
+        mkdir -p "$DEB_DIR/usr/share/applications"
+        
+        # Binary
+        cp "$LINUX_BIN" "$DEB_DIR/usr/local/bin/$APP_NAME"
+        chmod +x "$DEB_DIR/usr/local/bin/$APP_NAME"
+        
+        # Control File
+        cat > "$DEB_DIR/DEBIAN/control" << EOF
+Package: health-hmis-agent
+Version: ${VERSION}
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Health HMIS Team
+Depends: libgtk-3-0, libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0
+Description: Health HMIS Agent for silent printing and device integration.
+EOF
+
+        # Desktop Entry
+        cat > "$DEB_DIR/usr/share/applications/$APP_NAME.desktop" << EOF
+[Desktop Entry]
+Name=Health HMIS Agent
+Comment=Silent Printing Agent
+Exec=/usr/local/bin/$APP_NAME
+Type=Application
+Terminal=false
+Categories=Utility;
+EOF
+
+        # Build DEB
+        dpkg-deb --build "$DEB_DIR" "release/HealthHMISAgent-v${VERSION}-amd64.deb"
+        echo -e "${GREEN}   ✓ DEB created: release/HealthHMISAgent-v${VERSION}-amd64.deb${NC}"
+        
+        # Also zip the binary for non-Debian users
+        zip -j "release/HealthHMISAgent-v${VERSION}-linux-amd64.zip" "$LINUX_BIN"
+        echo -e "${GREEN}   ✓ Linux Zip created${NC}"
+    else
+        echo -e "${RED}❌ Linux build failed${NC}"
+    fi
+
+    # -----------------------------------------------------
+    # 2. Windows EXE & Installer
+    # -----------------------------------------------------
+    echo "   Building Windows binary..."
+    # Attempt to build with NSIS installer if supported
+    wails build -platform windows/amd64 -clean -o "${APP_NAME}.exe" 
+    
+    WIN_EXE="build/bin/${APP_NAME}.exe"
+    
+    if [ -f "$WIN_EXE" ]; then
+        # Rename and zip portable exe
+        cp "$WIN_EXE" "release/HealthHMISAgent-v${VERSION}.exe"
+        zip -j "release/HealthHMISAgent-v${VERSION}-windows-amd64.zip" "$WIN_EXE"
+        echo -e "${GREEN}   ✓ Windows .exe and .zip created${NC}"
+        
+        # Check if installer was generated (needs wails nsis config)
+        # If wails.json doesn't configure nsis, this file won't exist.
+        # But we can try 'wails build -nsis'
+    else
+        echo -e "${RED}❌ Windows build failed${NC}"
+    fi
+}
 
 
-echo "Building for macOS (ARM64/Silicon)..."
-GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w" -o $OUT_DIR/temp_arm64 main.go
+# MAIN LOGIC
+# Check if running inside Docker (simple check for /.dockerenv or hostname)
+if [ "$1" == "linux-docker" ]; then
+    build_linux_windows
+    
+    # Fix permissions for artifacts created inside docker (owned by root usually)
+    # chown -R $(stat -c "%u:%g" .) release
+    # Above simpler: chmod 777 release/*
+    chmod -R 777 release
+    
+    exit 0
+fi
 
-# Package macOS ARM64 App
-APP_DIR="$OUT_DIR/HealthAgent-Mac-Silicon.app"
-mkdir -p "$APP_DIR/Contents/MacOS"
-cp Info.plist "$APP_DIR/Contents/"
-cp $OUT_DIR/temp_arm64 "$APP_DIR/Contents/MacOS/health-agent"
-chmod +x "$APP_DIR/Contents/MacOS/health-agent"
-# Ad-hoc sign the app to prevent "Damaged" error
-codesign --force --deep -s - "$APP_DIR"
-# Zip the app
-cd $OUT_DIR
-zip -r agent-$VERSION-mac-arm64.zip HealthAgent-Mac-Silicon.app
-rm -rf HealthAgent-Mac-Silicon.app temp_arm64
-cd ..
+# Detect OS Logic
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # Running on Host Mac
+    
+    # 1. Build macOS Native
+    build_macos
+    
+    # 2. Ask for Linux/Windows Docker Build
+    echo -e "\n${YELLOW}❓ Do you want to build Linux (Deb/Zip) & Windows (Exe) using Docker? (y/n)${NC}"
+    read -p "> " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if ! command -v docker >/dev/null 2>&1; then
+            echo -e "${RED}❌ Docker not found. Install Docker Desktop to build for Linux/Windows.${NC}"
+            exit 1
+        fi
+        
+        echo -e "${BLUE}🐳 Building Docker Image 'health-agent-builder'...${NC}"
+        docker build -t health-agent-builder -f Dockerfile.linux .
+        
+        echo -e "${BLUE}🐳 Running Build inside Docker...${NC}"
+        # Mount current dir to /app
+        docker run --rm -v "$(pwd):/app" health-agent-builder
+    else
+        echo "Skipping Linux/Windows build."
+    fi
+    
+else
+    # Assume running on Linux host natively
+    build_linux_windows
+fi
 
-
-echo "Building for Linux (AMD64)..."
-GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o $OUT_DIR/agent-linux-amd64 main.go
-cd $OUT_DIR
-zip agent-$VERSION-linux-amd64.zip agent-linux-amd64
-rm agent-linux-amd64
-cd ..
-
-echo "Building for Windows (AMD64)..."
-GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o $OUT_DIR/agent-windows-amd64.exe main.go
-cd $OUT_DIR
-zip agent-$VERSION-windows-amd64.zip agent-windows-amd64.exe
-rm agent-windows-amd64.exe
-cd ..
-
-echo "Build complete. Versioned zips and metadata.json created in 'release/'."
-
-# Auto-deploy to both UM and Root-Config (Shell)
-TARGET_UM="../um/public/agent"
-TARGET_SHELL="../root-config/public/agent"
-
-mkdir -p $TARGET_UM
-mkdir -p $TARGET_SHELL
-cp $OUT_DIR/* $TARGET_UM/
-cp $OUT_DIR/* $TARGET_SHELL/
-
-echo "Deployed artifacts to $TARGET_UM and $TARGET_SHELL"
+echo -e "\n${GREEN}🎉 Build process finished! Check the 'release' folder.${NC}"
+ls -lh release/
