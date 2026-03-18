@@ -203,10 +203,24 @@ HTML cannot be sent natively to thermal sticker printers (blurred graphics). **Z
 
 Raw ZPL/ESC-POS assembly cannot be sent through standard print APIs. We heavily intervene here.
 
-### 9.1 Bypassing Drivers on Windows (`sendPhysicalRaw`)
-1.  **PowerShell Injection**: Dynamically generates a temporary `.ps1` script.
-2.  **C# COM Bridge**: Embeds **C# (`System.Runtime.InteropServices`)**.
-3.  **Direct Spooling**: Hooks into **`winspool.drv`**. Calls `OpenPrinter`, allocates memory, and pipes the assembly straight to the USB port.
+### 9.1 Bypassing Drivers on Windows (`sendPhysicalRaw` and the `.ps1` script)
+
+Because the application needs to send exact byte-arrays of raw commands (like ZPL or ESC-POS) directly into the USB/network adapter of a physical printer—bypassing the standard Windows print drivers which would otherwise just render the text as an image—it leverages a dynamically generated PowerShell (`.ps1`) script.
+
+1.  **Dynamic Generation**: When a raw print job is requested, the `sendPhysicalRaw` function in `osPrinter.js` dynamically compiles and writes a temporary script called `rawprint-[timestamp].ps1` to the OS temporary directory (`os.tmpdir()`).
+2.  **C# COM Bridge**: The generated `.ps1` script contains embedded **C# code** (`System.Runtime.InteropServices`) that directly hooks into the core Windows Print Spooler API (`winspool.drv`). It explicitly imports native Windows methods like `OpenPrinter`, `StartDocPrinter`, `StartPagePrinter`, and `WritePrinter`.
+    - **Why C# via PowerShell?**: Node.js cannot natively talk to Windows C++ DLLs (`winspool.drv`) without requiring users to install heavy visual studio build tools (like `node-gyp` or `ffi-napi`) which constantly break across Node versions. By embedding C# inside PowerShell (`Add-Type -TypeDefinition`), Windows compiles the C# class in-memory natively on-the-fly without needing any external SDKs.
+3.  **Direct Spooling**: The C# code allocates unmanaged memory and pipes the exact raw assembly payload straight to the printer port.
+4.  **Auto-Cleanup**: Once the PowerShell process executes and the raw bytes are pushed, the Node.js application immediately deletes the temporary `.ps1` script from the disk (`fs.unlinkSync(scriptPath)`).
+
+### 9.2 OS Printer Discovery & Capabilities Queries (Windows)
+
+Node.js/Electron does not natively expose driverless IPP (Internet Printing Protocol) printers on Windows or deep printer capabilities. We utilize native OS commands via `exec()` to extract this:
+
+1.  **PowerShell `Get-Printer`**: Electron's `getPrintersAsync()` frequently misses modern driverless printers. We execute `powershell -Command "Get-Printer"` to catch all system-registered printers.
+2.  **Windows Management Instrumentation (WMI)**: Used as a fallback (`Get-WmiObject -Class Win32_Printer`) for older hospital machines running legacy Windows versions where the modern `PrintManagement` module doesn't exist.
+3.  **Paper Size Extraction via .NET**: To extract supported paper sizes for a specific printer (ensuring the UI shows real paper trays rather than hardcoded ones), we execute a PowerShell one-liner that invokes the .NET `[System.Drawing.Printing.PrinterSettings]` class:
+    - This bypasses the need for compiled Node extensions to fetch the printer's `PaperSizes` collection directly from the OS registry.
 
 ### 9.2 MacOS/Linux Spooling (`CUPS`)
 The agent spawns a child shell using the native raw passthrough of CUPS:
